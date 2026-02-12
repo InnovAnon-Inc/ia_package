@@ -1,0 +1,10 @@
+tomllib
+PyInstaller
+setuptools
+github
+git
+tomli_w
+build
+mdutils
+pipreqs
+Cython
