@@ -48,6 +48,8 @@ import pipreqs
 #import tomli
 import tomli_w
 
+from ia_execution_mode import * 
+
 ##
 #
 ##
@@ -1482,7 +1484,7 @@ def get_build_env(afdo_path: Path) -> Dict[str, str]:
     return env
 
 def transition_to_compiled(root:Path, name:str, clobber:bool=False)->None:#|None=None)->None: # TODO needs to return the wheel(s)
-    assert not get_execution_mode().is_compiled
+    assert not is_compiled()
     #root            :Path          = root or Path(os.getcwd()).resolve()
     pyproject_toml  :Path          = root / 'pyproject.toml'
     setup_py        :Path          = root / 'setup.py'
@@ -1508,8 +1510,8 @@ def transition_to_compiled(root:Path, name:str, clobber:bool=False)->None:#|None
     create_readme_md_if_not_exists       (readme_md,      name, description, clobber=clobber)
     create_manifest_in_if_not_exists     (manifest_in,                       clobber=clobber)
     # TODO need to determine which build we're on, i.e., for autofdo, so we set the right cflags
-    with bootstrapped(dependencies={ 'build': 'build', }):
-        python_m_build(build_env)
+    #with bootstrapped(dependencies={ 'build': 'build', }):
+    python_m_build(build_env)
     install_wheels(dist_dir)
     # TODO only if compilng self. otherwise... gotta manage restarting external projects/processes
     #reexec_as_compiled()
@@ -1542,8 +1544,8 @@ def transition_to_deb(root: Path, wheel_path: Path, name: str):
     Uses the current sys.executable to ensure chroot/venv integrity.
     """
     dist_dir        :Path          = root / 'dist'
-    with bootstrapped(dependencies={'wheel2deb': 'wheel2deb'}):
-        subprocess.run([
+    #with bootstrapped(dependencies={'wheel2deb': 'wheel2deb'}):
+    subprocess.run([
             sys.executable, "-m", "wheel2deb",
             "--wheel", str(wheel_path),
             "--output-dir", str(dist_dir),
@@ -1685,7 +1687,7 @@ def transition_to_bundled(root: Path, name: str, clobber: bool = False) -> None:
     Finds every __main__.py in the project (excluding root)
     and bundles them into individual executables.
     """
-    assert not get_execution_mode().is_bundled
+    assert not is_bundled()
     #from git import Repo
     import git
     repo = git.Repo(root, search_parent_directories=True)
@@ -1817,32 +1819,32 @@ def bootstrap_execution_mode(root:Path, name:str)->None:
     #   bootstrap_other_execution_mode()
 
     # TODO if self is target (i.e., cwd is parent of path exec'd script ?)
-    mode                    :ExecutionMode = get_execution_mode()
-    if not mode.is_compiled:
-        with bootstrapped({
-            'git'        : 'GitPython',
-            'github'     : 'PyGithub',
-            'mdutils'    : 'MdUtils',
-            'pipreqs'    : 'pipreqs',
-            #'tomli'      : 'tomli',
-            'tomli_w'    : 'tomli_w', }):
-            #import git
-            #import github
-            #import mdutils
-            #import pipreqs
-            #import tomli
-            #import tomli_w
+    #mode                    :ExecutionMode = get_execution_mode()
+    if not is_compiled():
+        #with bootstrapped({
+        #    'git'        : 'GitPython',
+        #    'github'     : 'PyGithub',
+        #    'mdutils'    : 'MdUtils',
+        #    'pipreqs'    : 'pipreqs',
+        #    #'tomli'      : 'tomli',
+        #    'tomli_w'    : 'tomli_w', }):
+        #    #import git
+        #    #import github
+        #    #import mdutils
+        #    #import pipreqs
+        #    #import tomli
+        #    #import tomli_w
             git_ignore      :Path          = root / '.gitignore'
             ensure_synchronized_source(root)
             create_gitignore_if_not_exists(git_ignore, clobber=True)
             transition_to_compiled(root, name, clobber=True) # TODO needs to return the wheel(s)
             #transition_to_deb(root, wheel, name) # TODO needs the wheel(s)
-    if not mode.is_bundled:
-        with bootstrapped({
-            'git'        : 'GitPython',
-            'github'     : 'PyGithub',
-            'PyInstaller': 'PyInstaller', }):
-            #import PyInstaller
+    if not is_bundled():
+        #with bootstrapped({
+        #    'git'        : 'GitPython',
+        #    'github'     : 'PyGithub',
+        #    'PyInstaller': 'PyInstaller', }):
+        #    #import PyInstaller
             transition_to_bundled(root, name, clobber=True)
     #if not mode.is_installed:
     #    raise NotImplementedError()
