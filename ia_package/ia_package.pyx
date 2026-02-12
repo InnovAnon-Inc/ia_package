@@ -48,6 +48,7 @@ import pipreqs
 #import tomli
 import tomli_w
 
+from ia_cflags         import *
 from ia_execution_mode import * 
 
 ##
@@ -749,44 +750,6 @@ def create_pyproject_toml_if_not_exists(pyproject_toml:Path, name:str, descripti
     assert pyproject_toml.is_file()
     return True
 
-def merge_compiler_flags()->None:
-    """
-    Parses current and env flags into a key-value map to handle overrides 
-    (e.g., -O2 -> -O3) and ensures 'Last-In-Wins' behavior.
-    """
-    target_keys = ['OPT', 'CFLAGS', 'PY_CFLAGS', 'PY_CORE_CFLAGS', 'CONFIGURE_CFLAGS', 'LDSHARED']
-    cvars = sysconfig.get_config_vars()
-
-    def tokenize_to_dict(flag_list):
-        """Converts flags into a dict for easy overriding."""
-        result = {}
-        # We use a placeholder for flags that don't take arguments (like -pipe)
-        for f in flag_list:
-            if f.startswith('-O'): result['-O'] = f
-            elif f.startswith('-march='): result['-march'] = f
-            elif f.startswith('-mtune='): result['-mtune'] = f
-            elif f.startswith('-g'): result['-g'] = f  # catches -g, -g0, -g3
-            else: result[f] = None
-        return result
-
-    # 1. Capture Environment Intent
-    env_flags = shlex.split(os.environ.get('CFLAGS', ''))
-    env_overrides = tokenize_to_dict(env_flags)
-
-    for key in target_keys:
-        if key not in cvars: continue
-        
-        # 2. Tokenize existing Python defaults
-        current_flags = shlex.split(cvars[key])
-        flag_dict = tokenize_to_dict(current_flags)
-
-        # 3. Apply Overrides (Environment values replace Python defaults)
-        flag_dict.update(env_overrides)
-
-        # 4. Reconstruct the string
-        # If value is None, it's a standalone flag; otherwise, it's the full string (-O3)
-        final_flags = [f if v is None else v for f, v in flag_dict.items()]
-        cvars[key] = " ".join(final_flags)
 
 def _make_dict_init()->ast.AST:
     """_kwargs = dict(kwargs)"""
@@ -1324,6 +1287,7 @@ def create_manifest_in(manifest_in: Path, clobber:bool=False) -> None:
         "include pyproject.toml",
         "include setup.py",
         "include version.py", # TODO gotta be in submodule
+        "include *./__main__.py",
         "",
         "# Include all Cython/C++ source across the entire tree",
         "global-include *.pyx",
@@ -1388,100 +1352,8 @@ def reexec_as_compiled() -> None:
     logging.info(f"♻️ Pivoting to compiled module: {argv}")
     os.execv(venv_executable, argv)
 
-def detect_compiler_type() -> str:
-    """
-    Detects if the active compiler is 'clang' or 'gcc'.
-    Checks env vars first, then sysconfig, then binary help strings.
-    """
-    # 1. Check environment variables (the standard override)
-    cxx = os.environ.get('CXX') or os.environ.get('CC')
 
-    # 2. Fallback to sysconfig (what Python was built with / defaults to)
-    if not cxx:
-        cxx = sysconfig.get_config_var('CXX') or sysconfig.get_config_var('CC')
 
-    # 3. Default to 'g++' if still nothing
-    if not cxx:
-        cxx = 'g++'
-
-    # Clean the path (e.g., 'ccache g++' -> 'g++')
-    executable = shlex.split(cxx)[0]
-
-    # If the executable isn't in path, we're likely going to fail anyway,
-    # but let's assume gcc-like behavior
-    if not shutil.which(executable):
-        return 'gcc'
-
-    #try:
-    if True: # fail fast
-        # Ask the compiler who it is.
-        # Clang and GCC both support --version, but Clang identifies itself clearly.
-        result = subprocess.run([executable, '--version'],
-                                capture_output=True, text=True, check=False)
-        output = result.stdout.lower() + result.stderr.lower()
-
-        if 'clang' in output or 'apple llvm' in output:
-            return 'clang'
-        if 'gcc' in output or 'g++' in output:
-            return 'gcc'
-    #except Exception as e:
-    #    pass
-
-    return 'gcc' # Default fallback
-
-def get_cflags(afdo_path:Path, instrumentation:bool=True, compiler_type:str|None=None)->List[str]:
-    afdo_path                                = afdo_path.resolve() # just in case
-    compiler_type       :str                 = compiler_type or detect_compiler_type()
-    instrumentation_args:Dict[str,List[str]] = {
-            'clang': ['-gmlt', '-fdebug-info-for-profiling', ],
-            'gcc'  : ['-g1',   '-fno-eliminate-unused-debug-types', ],
-    }
-    instrumentated_args :Dict[str,List[str]] = {
-            'clang': [f'-fprofile-sample-use={afdo_path}', ], # '-Wno-missing-profile'
-            'gcc'  : [f'-fauto-profile={afdo_path}', ],
-    }
-    args                :List[str]           = []
-    if instrumentation:
-        _args           :List[str]           = instrumentation_args[compiler_type]
-        args.extend(_args)
-    
-    if afdo_path.exists():
-        logging.info(f'found profile: {afdo_path}')
-        assert afdo_path.is_file()
-        _args           :List[str]           = instrumentated_args[compiler_type]
-        args.extend(_args)
-        return args
-    assert not afdo_path.exists()
-    logging.warn(f'no profile: {afdo_path}')
-    return args
-
-def get_build_env(afdo_path: Path) -> Dict[str, str]:
-    """
-    Merges AFDO flags into existing CFLAGS/CXXFLAGS using shlex to ensure
-    proper quoting and to avoid redundant flag spam.
-    """
-    # 1. Get our desired flags as a list
-    new_flags_list         :List[str]     = get_cflags(afdo_path)
-
-    env                    :Dict[str,str] = os.environ.copy()
-
-    for key in ["CFLAGS", "CXXFLAGS"]:
-        # 2. Parse existing flags into a list
-        existing_val       :str           = env.get(key, "")
-        existing_flags_list:List[str]     = shlex.split(existing_val)
-
-        # 3. Merge lists.
-        # Using a dict or set logic here ensures 'idempotency' of the flags themselves.
-        # We put new_flags_list last so they take precedence if there's a conflict.
-        merged_list        :List[str]     = existing_flags_list + [
-                f
-                for f in new_flags_list
-                if f not in existing_flags_list]
-
-        # 4. Join back into a shell-safe string
-        env[key]                          = shlex.join(merged_list)
-
-    return env
 
 def transition_to_compiled(root:Path, name:str, clobber:bool=False)->None:#|None=None)->None: # TODO needs to return the wheel(s)
     assert not is_compiled()

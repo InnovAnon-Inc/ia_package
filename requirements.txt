@@ -1,10 +1,10 @@
-Cython
 mdutils
-git
-PyInstaller
-tomli_w
-tomllib
+Cython
 pipreqs
-setuptools
-ia_execution_mode
 github
+git
+setuptools
+PyInstaller
+tomllib
+tomli_w
+ia_execution_mode
