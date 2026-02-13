@@ -2,17 +2,11 @@
 # cython: language_level=3
 # distutils: language=c++
 
-# TODO need to support socks proxies as early as possible
 # TODO resolve discrepancies between what *should* be .gitignore'd and what was maybe checked in before the file was updated
 # TODO need to move version.py into a submodule
 # TODO need to support targeting self & others
 # TODO need to collect that perf data & merge the profiles
 # TODO code cleanup, etc.
-
-# TODO cflag method in setup.py
-# - if we can do it reflectively, then that is the gold standard
-# - otherwise, check whether we're installed. if we are, then the target setup.py can import the function from us. ofc, then the target pyproject.toml will also need to be informed.
-# - if we're bundled and not installed, then packaging it as a data file would be the only way to get at that source code.
 
 import ast
 from contextlib  import ExitStack, contextmanager
@@ -35,21 +29,224 @@ import subprocess
 from subprocess  import Popen
 import sys
 import sysconfig
+import tempfile
 import time
 import tomllib
 from types       import *
 from typing      import *
+import zipfile
 
 import build
+import dotenv
 import git
 import github # FIXME unused ???? !!!!!!! how to create remote repo ?
 import mdutils
+import mdutils.mdutils
 import pipreqs
+import pipreqs.pipreqs
 #import tomli
 import tomli_w
 
 from ia_cflags         import *
 from ia_execution_mode import * 
+
+def merge_compiler_flags()->None:
+    """
+    Parses current and env flags into a key-value map to handle overrides 
+    (e.g., -O2 -> -O3) and ensures 'Last-In-Wins' behavior.
+    """
+    target_keys = ['OPT', 'CFLAGS', 'PY_CFLAGS', 'PY_CORE_CFLAGS', 'CONFIGURE_CFLAGS', 'LDSHARED']
+    cvars = sysconfig.get_config_vars()
+
+    def tokenize_to_dict(flag_list):
+        """Converts flags into a dict for easy overriding."""
+        result = {}
+        # We use a placeholder for flags that don't take arguments (like -pipe)
+        for f in flag_list:
+            if f.startswith('-O'): result['-O'] = f
+            elif f.startswith('-march='): result['-march'] = f
+            elif f.startswith('-mtune='): result['-mtune'] = f
+            elif f.startswith('-g'): result['-g'] = f  # catches -g, -g0, -g3
+            else: result[f] = None
+        return result
+
+    # 1. Capture Environment Intent
+    env_flags = shlex.split(os.environ.get('CFLAGS', ''))
+    env_overrides = tokenize_to_dict(env_flags)
+
+    for key in target_keys:
+        if key not in cvars: continue
+        
+        # 2. Tokenize existing Python defaults
+        current_flags = shlex.split(cvars[key])
+        flag_dict = tokenize_to_dict(current_flags)
+
+        # 3. Apply Overrides (Environment values replace Python defaults)
+        flag_dict.update(env_overrides)
+
+        # 4. Reconstruct the string
+        # If value is None, it's a standalone flag; otherwise, it's the full string (-O3)
+        final_flags = [f if v is None else v for f, v in flag_dict.items()]
+        cvars[key] = " ".join(final_flags)
+
+
+
+##
+#
+##
+
+#def get_binary_build_id(path: Path) -> str:
+#    """Gets the Build ID from the ELF header of a local binary."""
+#    # Uses readelf or similar tool to get the ID
+#    cmd = ["readelf", "-n", str(path)]
+#    res = subprocess.run(cmd, capture_output=True, text=True)
+#    match = re.search(r"Build ID: (\w+)", res.stdout)
+#    return match.group(1) if match else ""
+#
+#def get_perf_data_build_ids(perf_data: Path) -> Dict[str, str]:
+#    """Returns a map of {binary_path: build_id} found in the perf file."""
+#    cmd = ["perf", "buildid-list", "-i", str(perf_data)]
+#    res = subprocess.run(cmd, capture_output=True, text=True)
+#    # Output is usually: <id> <path>
+#    mapping = {}
+#    for line in res.stdout.splitlines():
+#        parts = line.split()
+#        if len(parts) >= 2:
+#            mapping[parts[1]] = parts[0]
+#    return mapping
+#
+#def get_build_ids_from_wheel(wheel_path: Path) -> Dict[str, str]: # TODO split; see below
+#    ids = {}
+#    with zipfile.ZipFile(wheel_path, 'r') as z:
+#        # Find all shared objects in the wheel
+#        so_files = [f for f in z.namelist() if f.endswith('.so')]
+#        for so_file in so_files:
+#            with tempfile.NamedTemporaryFile() as tmp:
+#                tmp.write(z.read(so_file))
+#                tmp.flush()
+#                ids[so_file] = get_binary_build_id(Path(tmp.name))
+#    return ids
+#
+#
+#def create_project_afdo(afdo_path:Path, dist_dir:Path)->None:
+#    # 1. DISCOVERY: Find the most recent 'Pass 1' (Probe) wheel
+#    whl_file = max(dir_dir.glob("*.whl"), key=os.path.getmtime)
+#    
+#    # 2. EXTRACTION: Get all .so files from the wheel to a temp 'bin_pool'
+#    # (We need the actual binaries to map the perf.data symbols)
+#    binaries = extract_all_sos_from_whl(whl_file, tmp_dir)
+#    
+#    # 3. MAPPING: Get Build IDs for these binaries
+#    # We use these IDs to find the matching 'global.perf.data' files
+#    target_ids = {get_build_id(b) for b in binaries}
+#    matching_perf_files = filter_perf_pool_by_ids(raw_dir, target_ids)
+#    
+#    # 4. GENERATION: One profile to rule them all
+#    # We create ONE .afdo file that covers the whole project
+#    #afdo_path = Path("ia_package.afdo")
+#    create_gcov_master(binaries, matching_perf_files, output=afdo_path)
+#    
+#    # 5. RE-BUILD: Supply to all artifacts
+#    # In setup.py, all extensions now point to this one file
+#    # get_cflags(afdo_path) -> ['-fauto-profile=ia_package.afdo', ...]
+
+def extract_all_sos_from_whl(whl_file: Path, extract_to: Path) -> List[Path]:
+    """Unzips only .so files from a wheel into a flat directory."""
+    extracted_paths = []
+    with zipfile.ZipFile(whl_file, 'r') as z:
+        for member in z.namelist():
+            if member.endswith('.so'):
+                # Flatten the structure to avoid deep nested imports in the pool
+                filename = Path(member).name
+                dest = extract_to / filename
+                with z.open(member) as source, open(dest, "wb") as target:
+                    shutil.copyfileobj(source, target)
+                extracted_paths.append(dest)
+    return extracted_paths
+
+# FIXME failing to use a module is shameful
+#from elftools.elf.elffile import ELFFile
+#import readelf
+def get_binary_build_id(path: Path) -> str:
+    """Extracts Build ID using readelf."""
+    cmd = ["readelf", "-n", str(path)] # TODO no python module for this ?
+    res = subprocess.run(cmd, capture_output=True, text=True)
+    # Looking for 'Build ID: <hex>'
+    match = re.search(r"Build ID:\s+([0-9a-fA-F]+)", res.stdout)
+    return match.group(1) if match else ""
+
+def filter_perf_pool_by_ids(raw_dir: Path, target_ids: Set[str]) -> List[Path]:
+    """Returns perf.data files that match at least one target Build ID."""
+    matching_files = []
+    # Match the pattern used by 'perf --switch-output'
+    for perf_file in raw_dir.glob("global.perf.*"): # FIXME
+    #for perf_file in raw_dir.glob("*"):
+        cmd = ["perf", "buildid-list", "-i", str(perf_file)] # TODO double check that there's no module for this
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        
+        # Check if any ID in the perf file matches our wheel's IDs
+        recorded_ids = set(re.findall(r"([0-9a-f]{40})", res.stdout))
+        if target_ids.intersection(recorded_ids):
+            matching_files.append(perf_file)
+            
+    return sorted(matching_files, key=os.path.getmtime, reverse=True)
+
+def create_gcov_master(binaries: List[Path], perf_files: List[Path], output: Path) -> None:
+    """
+    Creates a unified .afdo profile for all binaries using all valid perf data.
+    """
+    if not perf_files:
+        logging.warning("No matching perf data found for these binaries.")
+        return
+
+    with tempfile.TemporaryDirectory() as tmp_work_dir:
+        work_path = Path(tmp_work_dir)
+        intermediate_afdos = []
+
+        # 1. We only need the LATEST matching perf file for a clean snapshot, 
+        #    or we could iterate all. Let's use the most recent for stability.
+        latest_perf = perf_files[0] 
+
+        for bin_path in binaries:
+            afdo_out = work_path / f"{bin_path.name}.afdo"
+            # create_gcov: Binary + Perf -> AFDO
+            cmd = [
+                "create_gcov",
+                f"--binary={bin_path}",
+                f"--profile={latest_perf}",
+                f"--out={afdo_out}"
+            ]
+            res = subprocess.run(cmd, capture_output=True, text=True)
+            if res.returncode == 0 and afdo_out.exists():
+                intermediate_afdos.append(afdo_out)
+
+        # 2. Merge all individual module profiles into the Master Project Profile
+        if intermediate_afdos:
+            merge_cmd = ["profile_merger", f"-out={output}"] + [str(a) for a in intermediate_afdos]
+            subprocess.run(merge_cmd, check=True)
+            logging.info(f"Successfully created Master AFDO: {output}")
+
+def create_project_afdo(afdo_path: Path, dist_dir: Path, perf_dir: Path) -> None:
+    """Main entry point to JIT-generate a profile from recent builds."""
+    # 1. Find the latest 'Pass 1' wheel
+    wheels = list(dist_dir.glob("*.whl"))
+    if not wheels:
+        logging.error(f"No wheels found in {dist_dir}")
+        return
+    whl_file = max(wheels, key=os.path.getmtime)
+
+    with tempfile.TemporaryDirectory() as tmp_bin_dir:
+        tmp_dir = Path(tmp_bin_dir)
+
+        # 2. Extract .so files
+        binaries = extract_all_sos_from_whl(whl_file, tmp_dir)
+
+        # 3. Map IDs and Filter
+        target_ids = {get_binary_build_id(b) for b in binaries if get_binary_build_id(b)}
+        matching_perf_files = filter_perf_pool_by_ids(perf_dir, target_ids)
+
+        # 4. Generate Master AFDO
+        create_gcov_master(binaries, matching_perf_files, output=afdo_path)
 
 ##
 #
@@ -676,11 +873,80 @@ def create_gitignore_if_not_exists(gitignore:Path, clobber:bool=False)->bool:
     assert gitignore.is_file()
     return True
 
-def create_pyproject_toml(pyproject_toml:Path, name:str, description:str, clobber:bool=False)->None:
+def get_ia_build_dependencies(setup_py: Path) -> List[str]:
+    """
+    Statically analyzes setup.py to find all 'ia_*' modules
+    required at build-time.
+    """
+    if not setup_py.exists():
+        return []
+
+    with open(setup_py, "r", encoding="utf-8") as f:
+        try:
+            tree = ast.parse(f.read())
+        except SyntaxError:
+            logging.error(f"Syntax error while parsing {setup_py}")
+            return []
+
+    ia_deps = set()
+
+    for node in ast.walk(tree):
+        # Case 1: import ia_cflags, ia_execution_mode
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.startswith("ia_"):
+                    ia_deps.add(alias.name.split('.')[0])
+
+        # Case 2: from ia_cflags import get_cflags
+        elif isinstance(node, ast.ImportFrom):
+            if node.module and node.module.startswith("ia_"):
+                # Get the root package name (e.g., ia_cflags)
+                ia_deps.add(node.module.split('.')[0])
+
+    return sorted(list(ia_deps))
+
+def format_git_dependencies(
+    package_names: List[str],
+    org_name: str,
+    host: str = "github.com",
+    ref: str = "main"
+) -> List[str]:
+    """
+    Converts list of ia_* packages into git requirement strings.
+    Example: ia_cflags -> ia_cflags @ git+https://github.com/org/ia_cflags.git@main
+    """
+    git_deps = []
+    for pkg in package_names:
+        # Standard PEP 508 / 660 syntax for direct git references
+        url = f"git+https://{host}/{org_name}/{pkg}.git@{ref}"
+        git_deps.append(f"{pkg} @ {url}")
+
+    return git_deps
+
+def resolve_ia_build_deps( # FIXME debianized packages can't use git repos as deps
+    setup_py: Path,
+    org_name: str,
+    ref: str = "main"
+) -> List[str]:
+    """
+    The orchestrator: Finds what's used in setup.py and
+    returns the git strings for pyproject.toml
+    """
+    # 1. Statically find the imports
+    raw_packages = get_ia_build_dependencies(setup_py)
+
+    # 2. Convert to git requirements
+    return format_git_dependencies(raw_packages, org_name, ref=ref)
+
+def create_pyproject_toml(pyproject_toml:Path, setup_py:Path, org_name:str, name:str, description:str, clobber:bool=False)->None:
     #import tomli
     #import tomllib
     import tomli_w
     assert clobber or (not pyproject_toml.exists())
+
+    ia_deps = resolve_ia_build_deps(setup_py, org_name)
+    if ia_deps:
+        logging.info(f"Detected internal build dependencies: {ia_deps}")
     
     # Define the "Platonic Ideal"
     doc = {
@@ -691,8 +957,8 @@ def create_pyproject_toml(pyproject_toml:Path, name:str, description:str, clobbe
                 #"PyInstaller",
                 "setuptools>=61.0.0",
                 "setuptools-scm>=8.0",
-                "wheel"
-            ],
+                "wheel",
+            ] + ia_deps,
             "build-backend"  : "setuptools.build_meta"
         },
         "project"     : {
@@ -740,13 +1006,13 @@ def create_pyproject_toml(pyproject_toml:Path, name:str, description:str, clobbe
         tomli_w.dump(doc, f)
     assert pyproject_toml.is_file()
 
-def create_pyproject_toml_if_not_exists(pyproject_toml:Path, name:str, description:str, clobber:bool=False)->bool:
+def create_pyproject_toml_if_not_exists(pyproject_toml:Path, setup_py:Path, org_name:str, name:str, description:str, clobber:bool=False)->bool:
     if (not clobber) and pyproject_toml.exists():
         assert pyproject_toml.is_file()
         return False
     assert clobber or (not pyproject_toml.exists())
     #with bootstrapped(dependencies={'tomli': 'tomli', 'tomli_w': 'tomli_w',}):
-    create_pyproject_toml(pyproject_toml, name, description, clobber=clobber)
+    create_pyproject_toml(pyproject_toml, setup_py, org_name, name, description, clobber=clobber)
     assert pyproject_toml.is_file()
     return True
 
@@ -866,8 +1132,21 @@ def _make_data_exclusion_logic() -> ast.AST:
     )
 
 def _get_compiler_logic_ast()->ast.AST:
-    source:str = inspect.getsource(merge_compiler_flags)
-    return ast.parse(source)
+    try:
+        source:str = inspect.getsource(merge_compiler_flags)
+        return ast.parse(source)
+    except (TypeError, AttributeError, OSError) as error:
+        # Fallback path: Handle Cythonized/Compiled binaries
+        # We generate an AST equivalent to:
+        # from ia_cflags.ia_cflags import merge_compiler_flags
+        logging.info(f"Function is compiled (Cython); returning Import AST instead of source AST. {error}")
+
+        return ast.ImportFrom(
+            #module='ia_cflags.ia_cflags',
+            module='ia_package.ia_package',
+            names=[ast.alias(name='merge_compiler_flags', asname=None)],
+            level=0
+        )
 
 def _generate_merged_setup_ast()->ast.AST:
     # 1. Boilerplate imports and comments
@@ -918,7 +1197,7 @@ def _generate_merged_setup_ast()->ast.AST:
 
     return ast.Module(body=header + imports + [compiler_logic, setup_func] + main_guard, type_ignores=[])
 
-def create_setup_py(setup_py:Path, clobber:bool=False)->bool:
+def create_setup_py(setup_py:Path, clobber:bool=False)->None:
     """ fully and accurately implements all 6 features known to be required """
     assert clobber or (not setup_py.exists())
     # feature 1: ext_modules
@@ -977,7 +1256,7 @@ def nonempty_lines(out:str)->List[str]:
     return list(filter(None,res))
 
 def create_requirements_txt(requirements_txt:Path, root:Path, clobber:bool=False)->None:
-    import pipreqs.pipreqs
+    #import pipreqs.pipreqs
     assert clobber or (not requirements_txt.exists())
     #args:List[str] = ['pipreqs', '--print', '--mode', 'no-pin', ] # --proxy
     #req :str       = subprocess.check_call(args, universal_newlines=True, )
@@ -1000,11 +1279,11 @@ def create_requirements_txt_if_not_exists(requirements_txt:Path, root:Path, clob
 
 def create_readme_md(readme_md:Path, name:str, description:str, clobber:bool=False)->None:
     #import mdutils
-    import mdutils.mdutils
-    from mdutils.mdutils import MdUtils # TODO double check that bootstrapped() handles this
+    #import mdutils.mdutils
+    #from mdutils.mdutils import MdUtils # TODO double check that bootstrapped() handles this
     assert clobber or (not readme_md.exists())
     # TODO the boilerplate markdown could look a little better
-    mdFile = MdUtils(file_name=str(readme_md), title=name)
+    mdFile = mdutils.mdutils.MdUtils(file_name=str(readme_md), title=name)
     mdFile.new_header(level=1, title='Overview')  # style is set 'atx' format by default.
     mdFile.new_paragraph(description)
     # NOTE we can't do this well without being dockerized
@@ -1355,18 +1634,22 @@ def reexec_as_compiled() -> None:
 
 
 
-def transition_to_compiled(root:Path, name:str, clobber:bool=False)->None:#|None=None)->None: # TODO needs to return the wheel(s)
+def transition_to_compiled(root:Path, dist_dir:Path, name:str, org_name:str, clobber:bool=False)->None:#|None=None)->None: # TODO needs to return the wheel(s)
     assert not is_compiled()
     #root            :Path          = root or Path(os.getcwd()).resolve()
     pyproject_toml  :Path          = root / 'pyproject.toml'
     setup_py        :Path          = root / 'setup.py'
     requirements_txt:Path          = root / 'requirements.txt'
     readme_md       :Path          = root / 'README.md'
-    dist_dir        :Path          = root / 'dist'
+    #dist_dir        :Path          = root / 'dist'
     manifest_in     :Path          = root / "MANIFEST.in"
     afdo_path       :Path          = root / f'{name}.afdo'
+    #perf_dir        :Path          = Path() / '.perf'
+    #perf_dir        :Path          = Path('/', 'tmp', '.perf') # FIXME it changes every fucking time and it's really starting to fucking piss me off
+    perf_dir        :Path          = Path('/', 'var', 'lib', 'ia_perf')
     module_dir      :Path          = root / name
     description     :str           = 'TODO description'
+    create_project_afdo(afdo_path, dist_dir, perf_dir)
     build_env       :Dict[str,str] = get_build_env(afdo_path)
     create_module_dir_if_not_exists      (root, module_dir) # clobber=clobber
     create_init_py_if_not_exists         (root,                              clobber=clobber)
@@ -1374,8 +1657,8 @@ def transition_to_compiled(root:Path, name:str, clobber:bool=False)->None:#|None
     mv_py_pyx                            (root) # clobber=clobber
     ln_s_pyx_py                          (root) # clobber=clobber
     #with bootstrapped(dependencies={'tomli': 'tomli', 'tomli_w': 'tomli_w',}):
-    create_pyproject_toml_if_not_exists  (pyproject_toml, name, description, clobber=clobber)
     create_setup_py_if_not_exists        (setup_py,                          clobber=clobber)
+    create_pyproject_toml_if_not_exists  (pyproject_toml, setup_py, org_name, name, description, clobber=clobber)
     #with bootstrapped(dependencies={ 'pipreqs': 'pipreqs',}):
     create_requirements_txt_if_not_exists(requirements_txt, root,            clobber=clobber)
     #with bootstrapped(dependencies={'mdutils' : 'MdUtils',}):
@@ -1410,12 +1693,14 @@ def transition_to_compiled(root:Path, name:str, clobber:bool=False)->None:#|None
 #    with bootstrapped(dependencies={'stdeb': 'stdeb'}):
 #        # stdeb is the easiest way to bridge setup.py to debian/
 #        subprocess.run(["python3", "setup.py", "--command-packages=stdeb.command", "bdist_deb"], cwd=root)
-def transition_to_deb(root: Path, wheel_path: Path, name: str):
+
+# TODO The catch: If you want ia_cflags to be a separate Debian package dependency (rather than being bundled inside your app's wheel), you'll need a wheel2deb configuration file (wheel2deb.yml) to map the Python name to the Debian name.
+def transition_to_deb(root: Path, dist_dir:Path, wheel_path: Path, name: str):
     """
     Wraps the existing wheel into a .deb.
     Uses the current sys.executable to ensure chroot/venv integrity.
     """
-    dist_dir        :Path          = root / 'dist'
+    #dist_dir        :Path          = root / 'dist'
     #with bootstrapped(dependencies={'wheel2deb': 'wheel2deb'}):
     subprocess.run([
             sys.executable, "-m", "wheel2deb",
@@ -1536,6 +1821,7 @@ def run_pyinstaller(bootstrap_py: Path, bundle_name: str, root: Path) -> None:
         '--clean',
         '--noconfirm',
         # TODO prefer already-compiled artifacts: extra paths = venv site packages
+        # TODO --add-data "/home/frederick/venv/lib/python3.13/site-packages/pipreqs/stdlib:pipreqs"
         str(bootstrap_py)
     ]
 
@@ -1707,10 +1993,12 @@ def bootstrap_execution_mode(root:Path, name:str)->None:
         #    #import tomli
         #    #import tomli_w
             git_ignore      :Path          = root / '.gitignore'
+            org_name:str = 'InnovAnon-Inc'
+            dist_dir        :Path          = root / 'dist'
             ensure_synchronized_source(root)
             create_gitignore_if_not_exists(git_ignore, clobber=True)
-            transition_to_compiled(root, name, clobber=True) # TODO needs to return the wheel(s)
-            #transition_to_deb(root, wheel, name) # TODO needs the wheel(s)
+            transition_to_compiled(root, dist_dir, name, org_name, clobber=True) # TODO needs to return the wheel(s)
+            #transition_to_deb(root, dist_dir, wheel, name) # TODO needs the wheel(s)
     if not is_bundled():
         #with bootstrapped({
         #    'git'        : 'GitPython',
@@ -1727,6 +2015,7 @@ def bootstrap_execution_mode(root:Path, name:str)->None:
 # TODO config dataclass ==> autogen __doc__ ==> docopt
 def main()->None:
     #bootstrap_environment()
+    dotenv.load_dotenv()
 
     root            :Path          = Path(os.getcwd()).resolve()
     name            :str           = root.name
