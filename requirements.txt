@@ -1,12 +1,11 @@
-tomllib
-github
-mdutils
-setuptools
-ia_execution_mode
-PyInstaller
-ia_cflags
-dotenv
-tomli_w
-Cython
-pipreqs
-git
+mdutils --no-binary :all:
+tomllib --no-binary :all:
+dotenv --no-binary :all:
+git --no-binary :all:
+pipreqs --no-binary :all:
+setuptools --no-binary :all:
+PyInstaller --no-binary :all:
+tomli_w --no-binary :all:
+github --no-binary :all:
+Cython --no-binary :all:
+ia_cflags --no-binary :all:

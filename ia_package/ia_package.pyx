@@ -40,15 +40,17 @@ import build
 import dotenv
 import git
 import github # FIXME unused ???? !!!!!!! how to create remote repo ?
+from github import Github, GithubException
 import mdutils
 import mdutils.mdutils
 import pipreqs
 import pipreqs.pipreqs
+import PyInstaller.__main__
 #import tomli
 import tomli_w
 
 from ia_cflags         import *
-from ia_execution_mode import * 
+#from ia_execution_mode import * 
 
 def merge_compiler_flags()->None:
     """
@@ -502,7 +504,7 @@ def _ensure_remote_repo_exists(remote_url: str) -> None: # FIXME
     repo_path = remote_url.split('github.com/')[-1].replace('.git', '')
     org_name, repo_name = repo_path.split('/')
 
-    from github import Github, GithubException
+    #from github import Github, GithubException
     gh = Github(auth=github.Auth.Token(token))
 
     try:
@@ -671,7 +673,7 @@ def _ensure_remote_repo_exists(remote_url: str) -> None: # FIXME
 #            raise SystemExit("Manual Git intervention required.")
 def ensure_synchronized_source(project_root: Path) -> None:
     """The clean entry point for the Bootstrapper's Git stage."""
-    import git
+    #import git
     #from git import Repo
     # TODO import github ????? how to create remote repo ????
 
@@ -783,7 +785,7 @@ def ensure_synchronized_source(project_root: Path) -> None:
 
 def get_eligible_files_git(repo_path: Path, extensions: List[str]) -> List[Path]:
     """Uses GitPython to find files not ignored by git."""
-    import git
+    #import git
     #from git import Repo
     repo = git.Repo(repo_path)
     
@@ -808,7 +810,7 @@ def mv_py_pyx(root:Path) -> None:
 
     for py_file in eligible:
 
-        if py_file.name in ('setup.py', 'version.py', ):
+        if py_file.name in ('setup.py', 'version.py', '__main__.py',):
             continue
 
         if py_file == entry_point:
@@ -828,7 +830,11 @@ def ln_s_pyx_py(root:Path) -> None:
     eligible:List[Path] = get_eligible_files_git(root, extensions=['.pyx'])
 
     for pyx_file in eligible:
+
         py_link:Path = pyx_file.with_suffix('.py')
+
+        if py_link.name in ('setup.py', 'version.py', '__main__.py',):
+            continue
 
         if not py_link.exists():
             logging.info(f"Link: {py_link.name} -> {pyx_file.name}")
@@ -941,7 +947,7 @@ def resolve_ia_build_deps( # FIXME debianized packages can't use git repos as de
 def create_pyproject_toml(pyproject_toml:Path, setup_py:Path, org_name:str, name:str, description:str, clobber:bool=False)->None:
     #import tomli
     #import tomllib
-    import tomli_w
+    #import tomli_w
     assert clobber or (not pyproject_toml.exists())
 
     ia_deps = resolve_ia_build_deps(setup_py, org_name)
@@ -952,11 +958,17 @@ def create_pyproject_toml(pyproject_toml:Path, setup_py:Path, org_name:str, name
     doc = {
         "build-system": {
             "requires"       : [
-                #"build",
+                "build",
                 "Cython",
+                "dotenv",
+                "GitPython",
+                "pipreqs",
+                "PyGithub",
                 #"PyInstaller",
+                "mdutils",
                 "setuptools>=61.0.0",
                 "setuptools-scm>=8.0",
+                "tomli_w",
                 "wheel",
             ] + ia_deps,
             "build-backend"  : "setuptools.build_meta"
@@ -1131,22 +1143,29 @@ def _make_data_exclusion_logic() -> ast.AST:
         orelse=[]
     )
 
-def _get_compiler_logic_ast()->ast.AST:
+def _get_compiler_logic_ast()->List[ast.AST]:
     try:
         source:str = inspect.getsource(merge_compiler_flags)
-        return ast.parse(source)
+        return [ast.parse(source)]
     except (TypeError, AttributeError, OSError) as error:
         # Fallback path: Handle Cythonized/Compiled binaries
         # We generate an AST equivalent to:
         # from ia_cflags.ia_cflags import merge_compiler_flags
         logging.info(f"Function is compiled (Cython); returning Import AST instead of source AST. {error}")
 
-        return ast.ImportFrom(
+        return [ast.ImportFrom(
             #module='ia_cflags.ia_cflags',
             module='ia_package.ia_package',
             names=[ast.alias(name='merge_compiler_flags', asname=None)],
-            level=0
-        )
+            level=0,
+        ),
+        # FIXME ia_cflags cannot depend on itself
+        ast.ImportFrom(
+            #module='ia_cflags.ia_cflags',
+            module='ia_cflags.ia_cflags',
+            names=[ast.alias(name='get_build_env', asname=None)],
+            level=0,
+        ),]
 
 def _generate_merged_setup_ast()->ast.AST:
     # 1. Boilerplate imports and comments
@@ -1195,7 +1214,7 @@ def _generate_merged_setup_ast()->ast.AST:
         "    setup(use_scm_version=True, setup_requires=['setuptools_scm'])\n"
     ).body
 
-    return ast.Module(body=header + imports + [compiler_logic, setup_func] + main_guard, type_ignores=[])
+    return ast.Module(body=header + imports + compiler_logic + [setup_func] + main_guard, type_ignores=[])
 
 def create_setup_py(setup_py:Path, clobber:bool=False)->None:
     """ fully and accurately implements all 6 features known to be required """
@@ -1262,6 +1281,8 @@ def create_requirements_txt(requirements_txt:Path, root:Path, clobber:bool=False
     #req :str       = subprocess.check_call(args, universal_newlines=True, )
     #reqs:List[str] = nonempty_lines(req)
     reqs:List[str] = pipreqs.pipreqs.get_all_imports(root)
+    reqs           = [f'{req} --no-binary :all:'
+                      for req in reqs]
     req :str       = '\n'.join(reqs)
     with open(requirements_txt, 'w') as f:
         f.write(req)
@@ -1360,7 +1381,7 @@ def create_init_py_if_not_exists(root: Path, clobber:bool=False) -> bool: # TODO
 
     as the name implies, it never clobbers pre-existing __init__.py files
     """
-    import git
+    #import git
     #from git import Repo, InvalidGitRepositoryError
 
     #try:
@@ -1467,7 +1488,7 @@ def generate_main_content(entry_module: str, is_async: bool) -> str:
 def create_main_py_if_not_exists(root: Path, clobber:bool=False) -> bool: # TODO skip top level ?
     """ never clobbers pre-existing __main__.py files """
     #from git import Repo
-    import git
+    #import git
     repo = git.Repo(root, search_parent_directories=True)
     modified = False
 
@@ -1523,7 +1544,7 @@ def create_module_dir_if_not_exists(root: Path, module_dir: Path) -> bool:
     If non-ignored directories already exist, we assume a structure is in place.
     """
     #from git import Repo, InvalidGitRepositoryError
-    import git
+    #import git
     
     try:
         repo = git.Repo(root, search_parent_directories=True)
@@ -1635,7 +1656,7 @@ def reexec_as_compiled() -> None:
 
 
 def transition_to_compiled(root:Path, dist_dir:Path, name:str, org_name:str, clobber:bool=False)->None:#|None=None)->None: # TODO needs to return the wheel(s)
-    assert not is_compiled()
+    #assert not is_compiled()
     #root            :Path          = root or Path(os.getcwd()).resolve()
     pyproject_toml  :Path          = root / 'pyproject.toml'
     setup_py        :Path          = root / 'setup.py'
@@ -1805,7 +1826,7 @@ def create_bootstrap_py_if_not_exists(bootstrap_py:Path, name:str, clobber:bool=
 
 def run_pyinstaller(bootstrap_py: Path, bundle_name: str, root: Path) -> None:
     """Invokes PyInstaller to freeze the bootstrap script into a standalone binary."""
-    import PyInstaller.__main__
+    #import PyInstaller.__main__
 
     # Define paths relative to the project root
     dist_path = root / "dist"
@@ -1845,9 +1866,9 @@ def transition_to_bundled(root: Path, name: str, clobber: bool = False) -> None:
     Finds every __main__.py in the project (excluding root)
     and bundles them into individual executables.
     """
-    assert not is_bundled()
+    #assert not is_bundled()
     #from git import Repo
-    import git
+    #import git
     repo = git.Repo(root, search_parent_directories=True)
 
     # 1. Ensure the PyInstaller hook exists for the core package
@@ -1978,7 +1999,8 @@ def bootstrap_execution_mode(root:Path, name:str)->None:
 
     # TODO if self is target (i.e., cwd is parent of path exec'd script ?)
     #mode                    :ExecutionMode = get_execution_mode()
-    if not is_compiled():
+    #if not is_compiled():
+    if True:
         #with bootstrapped({
         #    'git'        : 'GitPython',
         #    'github'     : 'PyGithub',
@@ -1999,7 +2021,8 @@ def bootstrap_execution_mode(root:Path, name:str)->None:
             create_gitignore_if_not_exists(git_ignore, clobber=True)
             transition_to_compiled(root, dist_dir, name, org_name, clobber=True) # TODO needs to return the wheel(s)
             #transition_to_deb(root, dist_dir, wheel, name) # TODO needs the wheel(s)
-    if not is_bundled():
+    #if not is_bundled():
+    if True:
         #with bootstrapped({
         #    'git'        : 'GitPython',
         #    'github'     : 'PyGithub',
@@ -2010,7 +2033,7 @@ def bootstrap_execution_mode(root:Path, name:str)->None:
     #    raise NotImplementedError()
     # TODO else build & install target (i.e, not self)
 
-    raise NotImplementedError()
+    #raise NotImplementedError()
 
 # TODO config dataclass ==> autogen __doc__ ==> docopt
 def main()->None:
