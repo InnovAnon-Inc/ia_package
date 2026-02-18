@@ -1415,12 +1415,13 @@ def _get_compiler_logic_ast()->List[ast.AST]:
             level=0,
         ),
         # FIXME ia_cflags cannot depend on itself
-        ast.ImportFrom(
-            #module='ia_cflags.ia_cflags',
-            module='ia_cflags.ia_cflags',
-            names=[ast.alias(name='get_build_env', asname=None)],
-            level=0,
-        ),]
+        #ast.ImportFrom(
+        #    #module='ia_cflags.ia_cflags',
+        #    module='ia_cflags.ia_cflags',
+        #    names=[ast.alias(name='get_build_env', asname=None)],
+        #    level=0,
+        #),
+        ]
 
 def _generate_merged_setup_ast()->ast.AST:
     # 1. Boilerplate imports and comments
