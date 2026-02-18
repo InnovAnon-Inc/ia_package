@@ -964,7 +964,7 @@ def create_pyproject_toml(pyproject_toml:Path, setup_py:Path, org_name:str, name
                 "GitPython",
                 "pipreqs",
                 "PyGithub",
-                #"PyInstaller",
+                "PyInstaller",
                 "mdutils",
                 "setuptools>=61.0.0",
                 "setuptools-scm>=8.0",
