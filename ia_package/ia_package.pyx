@@ -926,7 +926,7 @@ def format_git_dependencies(
         # Standard PEP 508 / 660 syntax for direct git references
         url = f"git+https://{host}/{org_name}/{pkg}.git@{ref}"
         git_deps.append(f"{pkg} @ {url}")
-
+    logging.info(f'git_deps: {git_deps}')
     return git_deps
 
 def resolve_ia_build_deps( # FIXME debianized packages can't use git repos as deps
@@ -940,6 +940,7 @@ def resolve_ia_build_deps( # FIXME debianized packages can't use git repos as de
     """
     # 1. Statically find the imports
     raw_packages = get_ia_build_dependencies(setup_py)
+    logging.info(f'raw_packages: {raw_packages}')
 
     # 2. Convert to git requirements
     return format_git_dependencies(raw_packages, org_name, ref=ref)
